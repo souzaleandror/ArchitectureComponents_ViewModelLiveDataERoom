@@ -945,3 +945,304 @@ Implementar o LiveData integrado com o ViewModel;
 Testar o comportamento do LiveData que respeita o Lifecycle-aware;
 Utilizar estratégia de cache para disponibilizar os dados do LiveData imediatamente;
 Verificar possíveis erros na resposta do LiveData;
+
+#### 12/10/2023
+
+@04-Ajustando as demais funcionalidades com o novo modelo
+
+@@01
+Migrando comportamento de salvar para novo modelo
+
+Conseguimos migrar a nossa lista de notícias para utilizarmos um novo modelo de arquitetura de apps, porém, as demais funcionalidades, seja para salvar, editar ou remover elementos, ainda estão usando o modelo antigo. Sendo assim, iremos adaptá-las, começando pelo comportamento de salvar uma notícia, incluindo título e texto.
+Para fazer com que isso funcione com o Live Data, abriremos FormularioNoticiaActivity.kt, em que temos salva(), cuja comunicação é realizada diretamente com o repositório. Sendo assim, precisaremos repetir o processo de criar um View Model para esta Activity, fazer com que ele tenha um repositório, dentro do qual faremos a modificação para que se trabalhe diretamente com o nosso Live Data.
+
+Lidaremos com as necessidades conforme forem surgindo, como nos casos de sucesso e falha, por exemplo. Comentaremos o seguinte trecho:
+
+// repository.salva(
+//    noticia,
+//    quandoSucesso = sucesso,
+//    quandoFalha = falha
+//)COPIAR CÓDIGO
+Vamos criar um View Model em Kotlin no pacote correspondente, chamado FormularioNoticiaViewModel, em que faremos uma extensão de View Model, e o implementaremos em nossa Activity, da mesma forma como feito anteriormente, utilizando o Lazy initialization:
+
+private val viewModel by lazy {
+    ViewModelProviders.of(activity: this)
+        .get(FormularioNoticiaViewModel::class.java)
+}COPIAR CÓDIGO
+Com isso, precisaremos incluir o comportamento de salvar sem enviar nenhuma high order function pois a abordagem utilizada será por meio de Live Data. Usaremos o atalho "Alt + Enter" e escolheremos "Create member function 'FormularioNoticiaViewModel.salva'".
+
+private fun salva(noticia: Noticia) {
+    val falha = { _: String? ->
+        mostraErro(MENSAGEM_ERRO_SALVAR)
+    }
+    val sucesso = { _: Noticia ->
+        finish()
+    }
+
+    if (noticia.id > 0) {
+        repository.edita(
+            noticia,
+            quandoSucesso = sucesso,
+            quandoFalha = falha
+        )
+    } else {
+    viewModel.salva(noticia)
+//        repository,salva(
+//            noticia,
+//            quandoSucesso = sucesso,
+//            quandoFalha = falha
+//        )
+}COPIAR CÓDIGO
+E em FormularioNoticiaViewModel.kt faremos as alterações necessárias. Neste momento, esperamos ter acesso ao repositório, o que faremos por meio de uma Property, e então pediremos para que se salve a nossa notícia, o que é o suficiente e, consequentemente, haja a devolução de um Live Data para que exista a conexão direta com a Activity (seu comportamento é justamente observar as mudanças deste Live Data).
+
+class FormularioNoticiaViewModel(
+    private val repository: NoticiaRepository
+): ViewModel() {
+
+    fun salva(noticia: Noticia): LiveData {
+        return repository.salva(noticia)
+    }
+}COPIAR CÓDIGO
+Mas qual é o valor esperado para este Live Data? Precisaremos retornar à nossa Activity e verificar o comportamento de quando havia sucesso, por exemplo. São duas variáveis que recebemos, implementadas como funções em salva(). Assim, basicamente na falha exibimos uma mensagem de erro, e no sucesso apenas finalizamos.
+
+Em sucesso, recebemos uma Noticia inutilizada, parte de uma implementação que não está sendo utilizada. Portanto não precisaremos nos preocupar em enviar um dado de verdade, que seja uma notícia. Poderemos enviar um dado qualquer equivalente a um Void, por exemplo, ou a nada.
+
+fun salva(noticia: Noticia): LiveData<Resource<Void?>> {
+    return repository.salva(noticia)
+}COPIAR CÓDIGO
+Com isso, é necessário adaptarmos o repositório para que ele consiga devolver o Live Data com o Resource, que poderá ser um Void de valor nulo, com a estratégia esperada, que no caso é exibir a mensagem de erro quando de fato ocorrer o erro. Em NoticiaRepository.kt, portanto, removeremos as funções quandoSucesso e quandoFalha, pois não precisamos mais de high order function.
+
+E quando utilizamos salvaNaApi(), já sabemos que quandoSucesso só será chamado de verdade quando o salvaInterno() ocorrer. Neste caso, o quandoSucesso implementado algumas linhas acima é chamado apenas quando se salva internamente. Indicaremos o Live Data esperado, de tipo Resource, um Void que poderá receber nulo.
+
+fun salva(
+    noticia: Noticia,
+) : LiveData<Resource<Void?>> {
+    val liveData = MutableLiveData<Resource<Void?>>()
+    salvaNaApi(noticia, quandoSucesso = {it: Noticia
+        liveData.value = Resource(dado: null)
+    }, quandoFalha = {erro ->
+        liveData.value = Resource(dado = null, erro = erro)
+    })
+    return liveData
+}COPIAR CÓDIGO
+Podemos estar nos indagando se precisaríamos criar uma Property, como em noticiasEncontradas, porém, neste caso não o faremos, pois não queremos manter o último valor do nosso Live Data, que será acionado apenas quando o nosso usuário indicar que quer salvar algo, por exemplo. Ou seja, poderemos criar um Live Data sempre, pois não queremos manter um valor a ser exibido ao usuário.
+
+Quando há sucesso, precisaremos acessar o liveData e modificar seu valor, apenas criando um Resource() com valor nulo, já que não lidaremos com valores. Simplesmente notificaremos que houve uma atualização que indica sucesso. No caso da falha, receberemos, além do nulo, a falha e, assim, pode-se indicar o criaResourceDeFalha().
+
+Porém, teríamos que ter um recurso pronto, e dado que não estamos mantendo o estado do Live Data, poderemos criá-lo manualmente, ou então outra função para criar um recurso de falha, que não depende do envio de um deles via argumento. Por fim, retornaremos liveData. Um último detalhe, visando compatibilidade, é enviar o repositório via Factory, sendo assim criaremos uma classe na pasta "factory", denominada FormularioNoticiaViewModelFactory.
+
+Uma vez que neste momento estamos utilizando exatamente a mesma estrutura de ListaNoticiasViewModelFactory.kt, basta copiarmos o seu conteúdo para incluirmos na nova classe. No entanto, é importante mantê-los separados, pois se houver algum tipo de argumento ou parâmetro a mais, não precisaremos comprometer outros Factories que criam outros View Models. A diferença, claro, é que implementaremos FormularioNoticiaViewModel, pois é necessário atendermos o tipo que esperamos.
+
+Em seguida, faremos a modificação em nosso Provider em FormularioNoticiaActivity.kt, para que ele utilize o Factory:
+
+private val viewModel by lazy {
+    val factory = FormularioNoticiaViewModelFactory(repository)
+    ViewModelProviders.of(activity: this, factory)
+        .get(FormularioNoticiaViewModel::class.java)
+}COPIAR CÓDIGO
+Agora que fizemos esta modificação e temos acesso ao Live Data, modificaremos os seguintes comportamentos:
+
+private fun salva(noticia: Noticia) {
+    val falha = { _: String? ->
+        mostraErro(MENSAGEM_ERRO_SALVAR)
+    }
+    val sucesso = { _: Noticia ->
+        finish()
+    }
+
+    if (noticia.id > 0) {
+        repository.edita(
+            noticia,
+            quandoSucesso = sucesso,
+            quandoFalha = falha
+        )
+    } else {
+    viewModel.salva(noticia).observe(owner: this, Observer {it: Resource<Void> 
+        if(it.erro == null){
+            finish()
+        } else {
+            mostraErro(MENSAGEM_ERRO_SALVAR)
+        }
+    })
+}COPIAR CÓDIGO
+Executaremos o aplicativo e testaremos para verificar seu funcionamento. Se conseguirmos nos comunicar com o servidor, que irá salvar, responder e salvar internamente, teremos uma nova notícia publicada na lista. Simularemos uma falha removendo a conexão com a internet, e com isso conseguimos fazer a mesma implementação de antes utilizando o Live Data, evitando o leak de memória, e assim por diante.
+
+A seguir, passaremos a fazer algumas modificações em outros pontos do nosso formulário, como naquela que diz respeito à busca, edição, entre outros.
+
+@@02
+Utilizando o ViewModel e LiveData ao salvar
+
+Caso você precise do projeto com todas as alterações realizadas na aula passada, você pode baixá-lo neste link.
+Migre o comportamento de salvar a notícia para que utilize o novo modelo de ViewModel e LiveData.
+
+Essa migração deve seguir os mesmos passos que foram realizados para o comportamento de busca de notícias, ou seja, criar um ViewModel para a Activity de formulário de notícia, um factory para receber o repositório e utilizar o LiveData para notificar a Activity quando a notícia for salva.
+
+Após adapter esse comportamento em específico, teste o App e veja se tudo funciona.
+
+O App deve manter o mesmo comportamento de antes ao salvar uma notícia, a diferença é que agora o LiveData é utilizado para determinar se a ação deu certo ou não.
+Você pode conferir o código da atividade a partir deste commit.
+
+https://github.com/alura-cursos/android-tech-news/tree/aula-3
+
+https://github.com/alura-cursos/android-tech-news/commit/4d8fe12aeeb549df1a223c5ac2c3afdc8e453a02
+
+@@03
+Realizando a edição com o ViewModel e LiveData
+
+Feita a conversão de salvar uma notícia utilizando a técnica de Live Data, repetiremos o procedimento para o comportamento de edição, que no momento ainda utiliza a técnica de high order function. O primeiro passo será analisar todo o contexto para entendermos o que faz sentido existir nesta conversão.
+Em todo o fluxo, o que basicamente acontece é que a Activity, ao salvar, envia uma notícia, então temos as funções que indicam o que queremos fazer quando há sucesso e falha. E então a Activity precisa tomar uma decisão no que diz respeito a salvar ou editar a notícia, sendo que toda esta responsabilidade não deveria ser dela.
+
+Isso porque envolve uma tomada de decisão, uma regra de negócios para o nosso aplicativo. Dado que agora temos o View Model capaz de manter os dados, bem como a regra de negócios com base nestes dados, faz todo sentido migrarmos todos estes comportamentos para o View Model.
+
+Então, acessaremos o View Model usando o atalho "Ctrl + M" e buscando por FormularioNoticiaViewModel.kt. Incluiremos nele o if() para a tomada de decisão, no caso, se o ID da lista de notícias recebida for maior do que zero, a edição poderá ser realizada, porque a notícia é válida e preexistente. Caso contrário, simplesmente salvaremos.
+
+fun salva(noticia: Noticia): LiveData<Resource<Void?>> {
+    return if(noticia.id > 0){
+        repository.edita(noticia)
+    } else {
+        repository.salva(noticia)
+    }
+}COPIAR CÓDIGO
+Com esta abordagem, conseguimos devolver nosso if (expression), pois tanto o Live Data feito para o edita() quanto para salva() serão compatíveis, e não precisaremos devolver uma notícia, por exemplo, para nenhum destes casos. É com base nesta estrutura que faremos nossa modificação.
+
+Acessaremos edita() de NoticiaRepository.kt e removeremos a high order function, e depois faremos a assinatura compatível, um Live Data de Resource que recebe um Void o qual pode ser vazio.
+
+fun edita(
+    noticia: Noticia
+) : LiveData<Resource<Void?>> {
+    editaNaApi(noticia, quandoSucesso, quandoFalha)
+}COPIAR CÓDIGO
+O próximo passo consiste em indicarmos o que fazer quando obtermos sucesso, ou falha, no fim das contas algo muito similar ao que fizemos no processo de salva(), e podemos inclusive copiar o seu trecho do seu conteúdo para adaptarmos:
+
+fun edita(
+    noticia: Noticia
+) : LiveData<Resource<Void?>> {
+    val liveData = MutableLiveData<Resource<Void?>>()
+    editaNaApi(noticia, quandoSucesso = {it: Noticia
+        liveData.value = Resource(dado: null)
+    }, quandoFalha = {erro ->
+        liveData.value = Resource(dado = null, erro = erro)
+    })
+    return liveData
+}COPIAR CÓDIGO
+editaNaApi() basicamente recebe a notícia, tem duas funções, e quanto obtém sucesso na API, ele faz a edição internamente, com salvaInterno(). Dado que conseguimos fazer a edição do nosso repository, editaNaApi(), precisaremos modificá-la na Activity para que ela deixe de tomar decisões. O código referente a salva() será simplificado, pois nossa estratégia se encontra em nosso View Model.
+
+private fun salva(noticia: Noticia) {
+    viewModel.salva(noticia).observe(owner: this, Observer {it: Resource<Void?>!
+        if (it.erro == null) {
+            finish()
+        } else {
+            mostraErro(MENSAGEM_ERRO_SALVAR)
+        }
+    })
+}COPIAR CÓDIGO
+Para verificar se os comportamentos são mantidos, vamos executar a aplicação no emulador. Testaremos os comportamentos de inserir, salvar e editar a lista de notícias, que funcionarão sem nenhum problema.
+
+Continuando, todos os repository em uso, por exemplo, podem ser convertidos para utilizarmos o View Model, para que assim as responsabilidades fiquem delegadas a ele, bem como ao Live Data. Se modificarmos buscaPorId(), isto impactará em outras Activities, como VisualizaNoticiaActivity, que também utiliza o repositório e o próprio buscaPorId().
+
+Isso demanda certo trabalho, e como os procedimentos são os mesmos, a seguir veremos os códigos já alterados, com as conversões feitas em todas as Activities, para otimizarmos tempo em conteúdo e assim lidarmos com o que ainda não foi visto.
+
+@@04
+Migrando o comportamento de edição
+
+Faça com que o comportamento de edição utilize também o mesmo modelo com ViewModel e LiveData.
+Além disso, adicione também a lógica que determina se vai salvar ou editar dentro do ViewModel também.
+
+Após migração, remova a referência do repositório da Activity, como também, todo o código que não é mais necessário, então teste o App e veja se ambos os comportamentos do formulário estão funcionando como esperado.
+
+O App deve funcionar como antes, a diferença é que a Activity de formulário está usando o novo modelo de arquitetura de Apps.
+Você pode conferir o código da atividade a partir deste commit.
+
+https://github.com/alura-cursos/android-tech-news/commit/7b798aa514baed2e60432f12d3f82005460d3c3f
+
+@@05
+Apresentando as mudanças
+
+A atualização do código foi finalizada, e todos os pontos que utilizavam a técnica anterior estão trabalhando tanto com o View Model quanto com o Live Data. Para conferir estas mudanças, testaremos no emulador o acesso ao formulário, não no momento de criação de uma notícia, e sim de edição, momento em que se faz a sua busca.
+Conseguimos visualizar e editar o formulário sem nenhum problema, ou seja, as features estão funcionando conforme esperado. Entenderemos como isso acontece, utilizando-se o View Model junto ao Live Data. Abriremos FormularioNoticiaActivity.kt, em que não há nenhuma referência do nosso repositório como sendo uma Property, isto é, nenhum dos comportamentos da nossa Activity está utilizando os repositórios, dado que a comunicação ocorre por meio do viewModel.
+
+No momento, solicitamos a função buscaPorId() enviando o ID como argumento (noticiaId), e então aplicamos a técnica de observar as mudanças, com o Live Data. Ao acessarmos a implementação de buscaPorId(), teremos uma nova função, declarada de modo mais enxuto, e que retorna repository.buscaPorId().
+
+E se acessarmos a função do repositório teremos uma implementação muito similar ao que fazíamos anteriormente, seja na parte de busca de listas, inserção ou edição. A diferença é que passamos a trabalhar diretamente com um Live Data que retorna uma notícia que poderá ser nula, porque neste caso não queremos especificamente um erro da API.
+
+Caso não haja nenhum retorno, como quando se retorna um valor nulo, subentendemos que não temos dados, tanto que em nossa Activity verificamos apenas se a referência é nula ou não. Então, em nosso banco de dados, se o dado não for encontrado, é devolvido o valor nulo. E se isto for verdade, não preenchemos os campos e não temos nenhuma notícia encontrada.
+
+fun buscaPorId(
+    noticiaId: Long
+): LiveData<Noticia?> {
+    val liveData = MutableLiveData<Noticia?>()
+    BaseAsyncTask(quandoExecuta = {
+        dao.buscaPorId(noticiaId)
+    }, quandoFinaliza = {it: Noticia?
+        liveData.value = it
+    }).execute()
+    return liveData
+}COPIAR CÓDIGO
+Neste caso, é desta forma que trabalhamos, e não com recursos. Atenção: não é porque utilizamos Resources para a nossa lista de notícias que teremos que fazê-lo em tudo. Às vezes, saber se é um valor nulo é o bastante para que tomemos algum tipo de decisão. Se voltarmos a outras Activities que representam a visualização das notícias, em VisualizaNoticiaActivity.kt também não trabalhamos mais com nosso repositório.
+
+Além disso, criamos um Factory para ele, característica interessante pois, em vez se apenas receber o nosso repositório, ele também recebe um ID de uma notícia. Fizemos desta forma porque VisualizaNoticiaViewModel, em vez de receber uma notícia como argumento, ele só possui uma referência de ID, e assim, com o envio do ID sendo feito internamente, conseguimos com que ele mesmo seja responsável de manter a notícia encontrada disponível.
+
+Assim, a nossa Activity não precisa se responsabilizar em ter que remover a notícia, por exemplo, pois isto será relegado a remove(), e com base na noticiaEncontrada será feita toda a estratégia de remoção. Aqui, foram utilizadas algumas técnicas que ainda não exploramos em cursos anteriores de Kotlin, algumas funções disponíveis na biblioteca padrão da linguagem (Kotlin Extension Library).
+
+No trecho de código abaixo, por exemplo, retornamos um Live Data de Resource que poderá ter um conteúdo Void que pode ser nulo. Se o erro for retornado, significará que, obviamente, houve um problema, algo muito similar ao que fizemos no comportamento de edição e inserção de uma notícia.
+
+fun remove(): LiveData<Resource<Void?>> {
+    return noticiaEncontrada.value?.run {this: Noticia
+        repository.remove(noticia: this)
+    } ?: MutableLiveData<Resource<Void?>>().also {it: MutableLiveData<Resource<Void?>>
+        it.value = Resource(dado: null, erro: "Notícia não encontrada")
+    }
+}COPIAR CÓDIGO
+Por que não utilizamos diretamente um if (expression), ou um Early return?
+
+É porque neste momento estamos trabalhando com uma condição, noticiaEncontrada, e estamos verificando se seu valor pode ser nulo ou não, já que esta possibilidade existe. Então, executamos o run, que basicamente devolve o valor dentro da função; this representa a notícia que consta em noticiaEncontrada, mas com run pegamos o value do Live Data, e garantimos que ele não é mais nulo, e assim pode-se fazer a remoção.
+
+Um detalhe desta técnica é que ele faz o retorno do último valor, então repository.remove() é justamente o valor retornado. Se colocássemos uma String, este seria identificado como sendo o retorno desejado, porém, a assinatura exige um Live Data de Resource que será um Void que poderá ser nulo.
+
+É por isso que utilizamos o run, que sempre coloca o último valor com o que esperamos devolver. Em seguida, quando verificamos se houve um valor nulo, e não uma notícia esperada, utilizamos algo similar a um operador ternário (?:), também conhecido como Elvis expression, por conta da referência ao cantor americano.
+
+Assim, será avaliada toda a expressão anterior, e se em algum momento for identificada alguma referência nula, a segunda execução, ou segunda parte do mesmo trecho de código, será processada. Depois, é chamada a função also, que pegará o valor a ser avaliado (MutableLiveData<Resource<Void?>>()) dentro dele mesmo, e então conseguimos trabalhar com ele como se fosse um it, e fazer a devolução dele mesmo.
+
+Portanto, entre also e run, a diferença é que neste conseguiremos transformar a mudança, no caso, para o Live Data do remove() do repositório, e em also queremos devolver o mesmo, com alguma modificação, pois queremos que ele tenha algum valor, o Resource nulo indicando que a notícia não foi encontrada, erro que queremos enviar.
+
+Veremos estas chamadas sendo feitas também no VisualizaNoticiaActivity.kt, em buscaNoticiaSelecionada, por exemplo, em que utilizamos buscaPorId(), além do noticiaEncontrada. Quando trabalhamos com a visualização da lista, podemos editá-la, e o dado consequentemente precisa ser atualizado. Se utilizarmos a Property em específico, esta atualização não será realizada, já que ela é executada apenas uma vez, nos devolvendo um valor diretamente.
+
+Isso porque não temos uma nova instância do View Model, que será sempre utilizado, mesmo que haja alguma mudança de configuração, como a rotação da tela do aplicativo. Por isto utilizamos o buscaPorId(), única maneira pública de se buscar uma notícia, em nossa Activity.
+
+Assim sendo, optamos pelo noticiaEncontrada em remove() pois precisamos que a execução de buscaPorId() seja realizada por alguém que possua um ciclo de vida, o Lifecycle owner. Ou seja, se chamássemos a função para verificar seu valor, teríamos uma referência nula, por não termos feito um Observer, necessário para o acesso do valor.
+
+Desta forma, garantimos que quando o buscaPorId() é executado ele seja inscrito na nossa Activity, fazendo o Observer e acessando o valor, retornando-o à noticiaEncontrada, pois a referência de retorno é a mesma. E então teremos o valor de noticiaEncontrada armazenado, e quando quisermos removê-lo, conseguimos utilizar a mesma referência que foi guardada uma vez.
+
+Ainda em relação à remoção, é executado um observe() em VisualizaNoticiaActivity.kt, que fica atento às mudanças:
+
+private fun remove() {
+    viewModel.remove().observe(owner: this, Observer {it: Resource<Void?>!
+        if (it.erro == null) {
+            finish()
+        } else {
+            mostraErro(MENSAGEM_FALHA_REMOCAO)
+        }
+    })
+}COPIAR CÓDIGO
+Estas foram as mudanças em nosso código, a seguir veremos um tópico um pouco mais avançado, que integra View Model, Live Data e Room, e como tiraremos proveito dessa integração, com base na solução atual.
+
+@@06
+Migrando todas as Activities para o novo modelo
+
+Migre todas as Activities para que seus estados e comportamentos sejam feitos a partir do ViewModel e LiveData.
+Após modificações, confira se todas as Activities não utilizam mais referências de repositórios, como também, se os estados de ambas foram enviados para o ViewModel respectivo, também, veja se todas as notificações à UI são feitas com o LiveData.
+
+Por fim, teste o App e confira se todos os comportamentos estão funcionando como antes.
+
+O App deve funcionar em todos os aspectos, a diferença é que ele deve usar o novo modelo de arquitetura de Apps em todas as Activities.
+Você pode conferir o código da atividade a partir deste commit.
+
+https://github.com/alura-cursos/android-tech-news/commit/d945f428a811a8b5ade9a5a2f66f901b57188a5f
+
+@@07
+O que aprendemos?
+
+Nesta aula, aprendemos:
+Migrar comportamentos de alteração do banco de dados com o LiveData;
+Novas funções disponíveis da Kotlin Standard Library;
+Que a implementação do novo modelo de arquitetura segue o mesmo padrão para todos os componentes.
