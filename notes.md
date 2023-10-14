@@ -1246,3 +1246,449 @@ Nesta aula, aprendemos:
 Migrar comportamentos de alteração do banco de dados com o LiveData;
 Novas funções disponíveis da Kotlin Standard Library;
 Que a implementação do novo modelo de arquitetura segue o mesmo padrão para todos os componentes.
+
+#### 13/10/2023
+
+@05-Utilizando a integração entre LiveData e Room
+
+@@01
+Integrando o LiveData com o Room
+
+Como havíamos comentado, utilizarmos Live Data, View Model e o Room em conjunto nos possibilita a explorar uma técnica sofisticada — a atualização automática das nossas entidades. Com o que temos atualmente, buscamos por uma lista de notícias no banco de dados, e também por uma notícia por meio de seu ID.
+No caso de alguma mudança no banco de dados, fazemos uma atualização chamando nosso Live Data no resumo, como acontece em ListaNoticiasActivity.kt, com onResume(). Da mesma forma, em VisualizaNoticiaActivity.kt, fazemos buscaNoticiaSelecionada() em onResume().
+
+Isso nos garante que quando a tela for retornada ao usuário, tenhamos a busca com o conteúdo mais atualizado possível. Por meio desta técnica, temos como benefício que, qualquer tipo de atualização que envolva nossa API ou então o banco de dados interno seja feita diretamente em nosso banco de dados, e que isso se reflita automaticamente na tela.
+
+Assim, evitamos a responsabilidade de termos que salvar na API, por exemplo, e em nosso banco de dados interno para que posteriormente possamos buscar e devolver a atualização. A partir de então, salvaremos o dado no banco de dados, o qual automaticamente é devolvido para nós, e esta abordagem faz parte das recomendações do guia de arquitetura de aplicativos, conhecido como Single source of truth (SSOT), "única fonte de verdade", em tradução livre.
+
+Isto quer dizer que, ao considerarmos esta técnica, sempre confiaremos em nosso banco de dados, ou seja, tudo que vier dele será considerado o mais atualizado, pois ele será o responsável em fazer as atualizações sobre qualquer mudança que tivermos em nossos dados, de maneira automática.
+
+Para esta implementação, é necessário alterar a forma como buscamos nossos dados. Em NoticiaDAO.kt, temos duas funções para isto: buscaTodos() e buscaPorId(). Atualmente, uma nos devolve uma lista de notícias enquanto a outra devolve uma lista que poderá ser nula. Podemos trabalhar em cima de um destes comportamentos; dado que é a primeira vez que implementamos isto, faz sentido buscarmos maior objetividade no resultado, então optaremos por buscaPorId().
+
+Quando fazemos a busca, apenas utilizamos a notícia que poderá ser nula, e não uma classe intermediária, como é o caso do Resource, sendo muito mais fácil fazer a conversão. Quando fazemos uma lista e depois temos um Resource, temos um trabalho extra, que veremos adiante.
+
+Basicamente, precisaremos transformar a notícia que poderá ser nula em um Live Data do mesmo. Então, quando usamos fun buscaPorId(id: Long): LiveData<Noticia?>, por exemplo, delegamos a responsabilidade do nosso banco de dados para que se crie um Live Data para atualizar em qualquer momento que este tipo de entidade tiver alguma mudança.
+
+Claro, agora que passamos a usar um Live Data, quem for utilizar diretamente o nosso DAO precisará se ajustar também, para que o Live Data funcione de maneira adequada. No caso, NoticiaRepository.kt precisará lidar com ele, e para isto modificaremos a função pública buscaPorId(), que possui o retorno esperado, LiveData<Noticia?>.
+
+Por conta disso, precisaremos apenas retornar o nosso dao que faz a busca por ID:
+
+fun buscaPorId(
+    noticiaId: Long
+): LiveData<Noticia?> {
+    return dao.buscaPorId(noticiaId)
+}COPIAR CÓDIGO
+Mas por quê podemos converter toda a nossa Async Task e View Model, criado manualmente, por este novo View Model feito pelo banco de dados? Porque não teremos mais a responsabilidade de atualizar o dado do nosso Live Data, pois o banco de dados fará esta atualização para nós. Além disto, todas as execuções ocorrerão de maneira paralela, sem travamento de tela, executando-se considerando o Lifecycle aware, e outras vantagens.
+
+Existem outros pontos do código que precisarão se adaptar quanto a isso, como no caso de salvaInterno(), que atualmente utiliza o buscaPorId() justamente por retornarmos a entidade do banco de dados que modificamos, para fins de atualização. Sendo assim, deletaremos a linha dao.buscaPorId(noticia.id), e acrescentaremos a notificação para quando há sucesso.
+
+private fun salvaInterno(
+    noticia: Noticia,
+    quandoSucesso: () -> Unit
+) {
+    BaseAsyncTask(quandoExecuta = {
+        dao.salva(noticia)
+    }, quandoFinaliza = {
+            quandoSucesso()
+    }).execute()
+}COPIAR CÓDIGO
+Isso afetará outros comportamentos, caso de salvaNaApi(), por exemplo, pois após ser salvo na API, o dado é salvo internamente, liberando acesso ao quandoSucesso, que como assinatura poderá ser removido:
+
+private fun salvaNaApi(
+    noticia: Noticia,
+    quandoSucesso: () -> Unit,
+    quandoFalha: (erro: String?) -> Unit
+) {
+    // código omitido
+}COPIAR CÓDIGO
+Temos a mesma abordagem em editaNaApi(), portanto também deletaremos noticiaEditada: Noticia da parte de quandoSucesso. Agora, testaremos fazendo com que, em VisualizaNoticiaActivity.kt, buscaNoticiaSelecionada() seja realizada no onCreate(), porque se a atualização é feita de maneira automática, entendemos que não precisamos mais manter este tipo de busca no resumo, nem o próprio onResume(), certo?
+
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    setContentView(R.layout.activity_visualiza_noticia)
+    title = TITULO_APPBAR
+    verificaIdDaNoticia()
+    buscaNoticiaSelecionada()
+}COPIAR CÓDIGO
+Executaremos o aplicativo para verificar seu funcionamento. Neste primeiro teste, teremos um resultado inesperado — a busca deveria funcionar, justamente porque o onCreate() é executado. Ao tentarmos fazer uma edição do título da notícia, a atualização não é realizada.
+
+Para que toda a atualização e a integração do que é modificado funcionem, a instância do nosso banco de dados precisa ser única para o nosso aplicativo, então, por exemplo, o View Model do nosso visualizador precisa utilizar a mesma instância do banco de dados que o View Model do nosso formulário.
+
+Este é o ponto principal a que precisamos nos atentar bastante. É necessário considerarmos o Design Pattern conhecido como Single tone, e termos uma única instância compartilhada entre todo o banco de dados. Se rotacionarmos a tela e chamarmos o onCreate() novamente, a atualização é realizada.
+
+Agora que utilizamos a abordagem de atualização automática, e não precisamos mais nos preocupar em chamar o Live Data novamente, finalizaremos a configuração desta integração automática criando o Single tone. Para isso, abriremos AppDatabase.kt, no local em que criamos a instância, em getInstance(), por meio de um companion object, que cria referências estáticas.
+
+Criaremos nele uma referência de um database, que é o que temos em relação à instância, utilizando o lateinit pois não teremos uma inicialização a princípio. Dentro do getInstance(), verificaremos se o nosso db (o AppDatabase) foi inicializado, e para isso utilizaremos funções do lateinit via Reflection, por meio do isInitialized.
+
+Tendo a sua confirmação, ele terá uma instância, e dado que é algo estático e que não depende de um objeto para ser criado, ele será mantido durante seu tempo de vida. E com isso simplesmente retornaremos o db.
+
+O código ficará da seguinte maneira:
+
+companion object {
+
+    private lateinit var db: AppDatabase
+
+    fun getInstance(context: Context): AppDatabase {
+
+        if(::db.isInitialized) return db
+
+        db = Room.databaseBuilder(
+            context,
+            AppDatabase::class.java,
+            NOME_BANCO_DE_DADOS
+        ).build()
+
+        return db
+    }
+}COPIAR CÓDIGO
+O próximo passo será, se isto não for inicializado, será executado o bloco de código que se segue e cria a instância para nós, que é como fazíamos anteriormente. Porém, antes do retorno, deixaremos o bloco no meio da nossa instrução getInstance(), devolvendo-o para o db. Assim, iremos inicializar nosso db caso ele não tenha nenhuma instância. Feito isto, aí sim poderemos retorná-lo.
+
+Deste modo garantimos que sempre devolveremos a mesma instância para toda a nossa aplicação, por ser uma referência estática, que portanto não será modificada conforme os objetos que criarmos em nosso aplicativo, a ser compartilhada para todos.
+
+Vamos testar nosso aplicativo verificando o comportamento de busca sendo atualizado automaticamente mesmo estando no onCreate(), e apenas quando é feita uma atualização no banco de dados interno. Editaremos o título de uma das notícias, e a atualização ocorre sem nenhum problema, mesmo quando rotacionamos a tela várias vezes.
+
+Esta abordagem é muito mais benéfica do que o nosso modelo atual, com o View Model, Live Data e o Room. A seguir, lidaremos com a conversão em nossa lista, pois se em ListaNoticiasActivity.kt removermos buscaNoticias() para utilizá-lo no onCreate(), teremos um comportamento similar ao que tivemos no visualizador.  
+
+@@02
+Atualizando a busca de notícia automaticamente
+
+Caso você precise do projeto com todas as alterações realizadas na aula passada, você pode baixá-lo neste link.
+Atualize o código para que a integração do LiveData e o Room aconteça.
+
+Para isso, modifique o retorno da busca de notícias do DAO para que devolva um LiveData de uma notícia que pode ser nula.
+
+Em seguida, modifique o repositório para que ele retorne diretamente o LiveData do DAO na sua função de busca de notícia por id.
+
+Com esse ajuste, não existe mais a necessidade uma HOF para buscar uma notícia, portanto, remova as funções da busca de notícia por id, e ajuste o repositório em todos os pontos que usam a busca de notícia por id.
+
+Após ajuste, faça com que a instância do AppDatabase seja única para todo o App, ou seja, considere o Design Pattern Singleton.
+
+Para testar essa nova abordagem, faça a busca da notícia pelo id no estado de criação da Activity de visualização da notícia. No teste, confira se os mesmos comportamentos funcionam, como é caso de editar a notícia e, após edição, a notícia é atualizada automaticamente.
+
+O comportamento de remoção apresenta problema com esse ajuste, mas não se preocupe que logo mais veremos como pode ser resolvido.
+
+O App deve funcionar sem problemas, a diferença fica na atualização automática feita por meio do LiveData integrado ao Room.
+Você pode conferir o código da atividade a partir deste commit.
+
+https://github.com/alura-cursos/android-tech-news/tree/aula-4
+
+https://github.com/alura-cursos/android-tech-news/commit/bb1bb1ef62397339a87d113296be989a323490f0
+
+@@03
+Conhecendo o mediador de LiveData
+
+Vimos como integrar nosso Live Data ao Room para conseguirmos fazer as atualizações automáticas em relação a qualquer tipo de busca, e faremos o mesmo para a nossa lista, pois atualmente já a modificamos para que a busca seja feita diretamente no onCreate(), então faremos com que isto funcione de forma automática tendo todos os benefícios vistos anteriormente.
+Para isso, alteraremos o NoticiaDAO.kt, assim como fizemos em buscaPorId() — transformaremos nossa lista de notícias como retorno para um Live Data de uma lista de notícias:
+
+@Query(value: "SELECT + FROM Noticia ORDER BY id DESC")
+fun buscaTodos(): LiveData<List<Noticia>>COPIAR CÓDIGO
+Precisaremos acessar o repositório para verificar quem utiliza esta referência, e fazer a adaptação conforme esta nova abordagem. buscaInterno() é a função responsável em buscar todas as notícias que foram salvas em nosso banco de dados. Como vimos, não precisamos mais de nenhuma Async Task, e nenhuma abordagem de funções, pois estaremos lidando diretamente com o Live Data que vem do banco de dados.
+
+Acessaremos o retorno, dao.buscaTodos(), removeremos a função como parâmetro e retornaremos o esperado, um Live Data de lista de notícia.
+
+private fun buscaInterno() : LiveData<List<Noticia>> {
+    return dao.buscaTodos()
+}COPIAR CÓDIGO
+Isso implica em quebra em alguns pontos do código, como era de se esperar, por considerarem que a busca interna retorne uma função, cuja lista é disponibilizada por meio de técnicas de high order function, sendo que neste caso isto não é verdade. Inclusive, nossa abordagem mudou, e não precisamos mais chamar buscaTodos() para devolver a nossa lista, pois ela ficará responsável por isso.
+
+Em salvaInterno(), quando tentamos salvar uma lista de notícias, neste caso só precisaremos nos responsabilizar em salvar, pois a mudança será notificada pelo banco de dados internamente. Também poderemos remover a assinatura de quandoSucesso:
+
+private fun salvaInterno(
+    noticias: List<Noticia>,
+    quandoSucesso: () -> Unit
+) {
+    BaseAsyncTask(
+        quandoExecuta = {
+            dao.salva(noticias)
+        }, quandoFinaliza = quandoSucesso
+    ).execute()
+}COPIAR CÓDIGO
+Feito isto, basta verificarmos quem está o utilizando, e para qual fim. No caso, será buscaNaApi(), que o utiliza para notificar que houve uma lista de notícias. Antes, tínhamos um Live Data que era um Mutable Live Data, e fazíamos as mudanças manualmente. Então, qualquer referência relacionada a uma lista de notícias e uma função não será mais utilizada.
+
+Não solicitaremos nenhum tipo de função em buscaNaApi(), portanto deletaremos a linha quandoSucesso: (List<Noticia>) -> Unit,, e em salvaInterno() da mesma função também não precisaremos mais enviar quandoSucesso. Do mesmo modo, em salvaInterno() poderemos remover a linha quandoSucesso: () -> Unit. Poderemos inclusive deixar isso como uma implementação de função vazia.
+
+private fun salvaInterno(
+    noticias: List<Noticia>
+) {
+    BaseAsyncTask(
+        quandoExecuta = {
+            dao.salva(noticias)
+        }, quandoFinaliza = {}
+    ).execute()
+}COPIAR CÓDIGO
+Feitas estas alterações, lidaremos com uma situação mais "problemática": da maneira como está o código, o retorno de buscaTodos() é LiveData<Resource<List<Noticia>?>>, um Live Data de um Resource de uma lista de notícias que poderá ser nula. O problema disso é que temos duas possibilidades de retorno de Live Data, o MutableLiveData criado que representa noticiasEncontradas, com a ideia de cache e tudo o mais, e o Live Data do nosso banco de dados.
+
+Será necessário algum tipo de técnica para reunir estas duas fontes de dados, e seus valores. Nesta busca, poderemos retornar a lista de notícias interna, que confiaremos como fonte única de verdade, e também a falha, motivo pelo qual utilizamos o Resource. Nestas condições, como poderemos juntar estes tipos de dados?
+
+Se tentarmos algo como noticiasEncontradas.value = buscaInterno().value, para tentarmos fazer a conversão para recurso, teremos um problema, já que o Live Data terá o dado disponível somente quando o Observer for feito em nossa Activity. Assim sendo, não teremos controle exato disto, e já lidamos com uma situação similar a essa, sabemos que teremos referências nulas. Esta, portanto, não é uma abordagem válida.
+
+Para que seja possível juntar as duas opções de Live Data e fazer o retorno tanto de noticiasEncontradas quanto de buscaInterno(), teremos um componente conhecido como mediador de Live Data, a partir do qual conseguimos que ele investigue e observe as mudanças de um ou mais Live Data, de forma a trabalhar em cima destes valores.
+
+Por ser uma parte mais teórica, para que isso não fique tão abstrato, simularemos o funcionamento deste mediador com base no nosso cenário atual. Temos um View Model que faz a comunicação com nosso repositório, ou seja, a comunicação da busca de notícias. Temos nosso cache que faz certa integração com a Web API.
+
+Independentemente do que é feito internamente, temos apenas uma única assinatura do Live Data, um único retorno para o nosso View Model, o que é o suficiente. Nosso cenário atual envolve duas possibilidades, uma com o cache e Web API, e outra com o banco de dados. Não temos a capacidade de juntá-los simultaneamente, porém temos o componente mediador, que observará modificações em ambos os Live Data.
+
+Neste momento, o componente também é considerado um Live Data, um "Live Data de Live Data", o que pode soar estranho. E ele será responsável por se comunicar diretamente com o View Model. Assim, ao atualizarmos o Live Data do banco de dados, a alteração será enviada para o mediador, que identificará a atualização (seria o On change do Live Data), e a enviará ao View Model.
+
+Do mesmo modo, ao atualizarmos o Live Data que envolve o cache e a Web API, a atualização é enviada ao mediador, que ficará atento com isto e a enviará ao View Model. Caso haja alguma mudança de configuração, nosso View Model pegará o último valor do mediador. O mediador é, portanto, muito similar ao MutableLiveData, armazenando cache e mantendo o último valor.
+
+A diferença é que ele possibilita que façamos as mudanças entre Live Data, com retornos simultâneos, e desta forma conseguimos notificar quando um deles apresentar algum tipo de mudança. Em nosso caso específico, o banco de dados poderá ser atualizado internamente, ou a Web API poderá ter um erro, que poderá ser propagado ao mediador, que por sua vez conseguirá disponibilizar a lista de notícias para o usuário, bem como enviar uma mensagem de erro.
+
+@@04
+Ajustando a busca de notícias
+
+Ajuste o código de busca de notícias para que utilize o LiveData integrado com o Room da mesma maneira que foi feito em vídeoaula
+Nesta atividade é apresentado um problema novo que será resolvido no próximo vídeo, portanto, basta apenas deixar o código conforme o vídeo sem a necessidade de testar.
+
+Você pode conferir o código da atividade a partir deste commit.
+
+@@05
+Sobre o uso de um mediador
+
+Vimos que em determinadas situações, precisamos de um mediador de LiveData... Em qual situação podemos considerar o seu uso?
+
+
+Quando precisamos retornar um LiveData que está integrado com o Room.
+ 
+O LiveData integrado ao Room funciona sem a necessidade do mediador.
+Alternativa correta
+Para juntar a mudanças de um ou mais LiveDatas em um só.
+ 
+Exatamente! Ao considerar o uso do mediador, temos a capacidade de observar a mudança de outros LiveDatas e retornar apenas um único LiveData.
+Alternativa correta
+Quando precisamos criar uma solução de LiveData que remove o uso de Higher-Order Functions.
+ 
+Alternativa correta
+Para modificar o valor de outros LiveDatas que não permitem a modificação.
+
+@@06
+Implementando o mediador de LiveData
+
+Vimos a parte teórica do mediador de Live Data, começaremos a fazer a implementação de código, que seguirá o modelo visto anteriormente, com algumas modificações, uma vez que nosso mediador se responsabilizará por observar tanto o Live Data do banco de dados quanto aquele que antes era do cache e da Web API, passando a ser apenas dos erros da Web API.
+Ou seja, esta parte de cache ficará dentro do mediador, que manterá o último valor de Resource, seja um que contenha apenas uma lista, uma lista ou um erro, ou ainda apenas um erro. Isto faz com que esteja subentendido que esse mediador será uma Property, por ter que manter o valor enquanto o repositório estiver funcionando.
+
+private val mediador = MediatorLiveData<Resource<List<Noticia>?>>()COPIAR CÓDIGO
+Com isto, temos um novo Live Data, com comportamento de um mediador. Para que ele observe os demais Live Data, em buscaTodos() podemos indicar que o mediador adicionará uma fonte com addSource(), que espera como argumentos um Live Data e a implementação do onChanged() do Observer, expressão lambda que colocávamos ao observarmos um Live Data na Activity, por exemplo. Receberemos ali os dados atualizados.
+
+Assim, teremos acesso ao it, que é a lista do nosso banco de dados, e conseguimos criar o Resource para o nosso mediador pois, por mais estranho que pareça, é como um MutableLiveData, com a diferença que ele consegue observar um ou mais Live Data para modificações necessárias, tendo como base as suas notificações.
+
+Então, apenas atualizaremos o valor do mediador incluindo um novo Resource que terá o dado com valor it, representando a nossa lista de notícias, a qual poderemos chamar de noticiasEncontradas, indicando que recebemos isto como parâmetro da expressão lambda.
+
+fun buscaTodos(): LiveData<Resource<List<Noticia>?>> {
+
+    mediador.addSource(buscaInterno(), Observer { noticiasEncontradas ->
+        mediador.value = Resource(dado = noticiasEncontradas)
+    })
+
+    // código omitido
+}COPIAR CÓDIGO
+Com esta implementação no addSource(), isto é identificado como sendo um Sum constructor, que pode ser convertido para uma expressão lambda no Kotlin, que nem precisará estar dentro dos parâmetros dos argumentos, chamado diretamente, sem que haja necessidade de fazermos Observer. Então, o trecho acima ficará da seguinte forma, muito mais sucinta:
+
+mediador.addSource(buscaInterno()) { noticiasEncontradas ->
+    mediador.value = Resource(dado = noticiasEncontradas)
+}COPIAR CÓDIGO
+Feito isso, poderemos remover funções e chamadas como atualizaListaNoticias e buscaInterno(). A parte com quandoSucesso também não é mais necessária, pois salvar internamente é o suficiente para que a busca interna seja atualizada. Em relação à quandoFalha, precisaremos verificar o que fazemos atualmente e o que faremos para que o nosso mediador funcione adequadamente.
+
+Uma vez que o mediador será responsável por manter o cache, o noticiasEncontradas não precisará ser uma Property, sendo assim removeremos a linha private val noticiasEncontradas = MutableLiveData<Resource<List<Noticia>?>>() e a incluiremos, sem private, dentro de buscaTodos().
+
+Após sua criação, indicaremos que o mediador ficará atento às suas mudanças. Modificaremos a forma como o MutableLiveData é ajustado para que quando haja notificação, venha o valor esperado, e para isso não verificaremos o cache, já que não manteremos nenhum nesta referência, que será interna, de buscaTodos(), cuja única responsabilidade é pegar o erro e criar um Resource correspondente para propagar este valor.
+
+fun buscaTodos(): LiveData<Resource<List<Noticia>?>> {
+
+    mediador.addSource(buscaInterno()) { noticiasEncontradas ->
+        mediador.value = Resource(dado = noticiasEncontradas)
+    }
+
+    val noticiasEncontradas = MutableLiveData<Resource<List<Noticia>?>>()
+    mediador.addSource(noticiasEncontradas) {it: Resource<List<Noticia>?>!
+        val resourceAtual = mediador.value
+        if(resourceAtual != null){
+            Resource(dado = resourceAtual.dado, erro = it.erro)
+        } else {
+            it
+        }
+    }
+
+    buscaNaApi(
+        quandoFalha = { erro ->
+            noticiasEncontradas.value = Resource(dado = null, erro = erro)
+        })
+    return noticiasEncontradas
+}COPIAR CÓDIGO
+Com esta abordagem, identificamos em nosso mediador teremos acesso ao recurso de erro, sendo que precisaremos nos atentar à parte de cache pois, como comentado, pode ser que ele devolva um Resource de lista, um Resource de lista com erro, ou apenas um Resource de erro.
+
+E em resourceAtual faremos as verificações, primeiro para saber se ele é nulo, e se ele for, será criado um Resource com dado baseado no resourceAtual, uma vez que é necessário manter a lista que tínhamos anteriormente. Enquanto isso, o erro se baseará em nosso it que recebemos nesta verificação, mediador ou addSource(), em noticiasEncontradas.
+
+Como noticiasEncontradas só irá propagar erros, vamos alterá-lo para falhasDaWebApiLiveData, para deixá-lo bem claro e semântico. Do mesmo modo, trocaremos it por resourceDeFalha, e como retorno do if, teremos um if (expression) denominado resourceNovo. Por fim, indicamos que o mediador terá um novo valor, resourceNovo.
+
+Neste caso, teremos a mesma peculiaridade de MutableLiveData, pois os valores podem não ser compatíveis, então, assumimos que será um Resource de uma lista de notícias que poderá ser nula.
+
+val falhasDaWebApiLiveData = MutableLiveData<Resource<List<Noticia>?>>()
+mediador.addSource(falhasDaWebApiLiveData) {resourceDefalha ->
+    val resourceAtual = mediador.value
+    val resourceNovo: Resource<List<Noticia>?> = if(resourceAtual != null){
+        Resource(dado = resourceAtual.dado, erro = resourceDeFalha.erro)
+    } else {
+        resourceDeFalha
+    }
+    mediador.value = resourceNovo
+}COPIAR CÓDIGO
+Atenção: verificar se as alterações se refletem em outros pontos do código e corrigir para que não haja falha na compilação!
+Conseguimos fazer com que o mediador fique atento a este tipo de mudança, e caso prefiram, podem deixar o mediador mais para baixo no código; a ordem não importará, o que vale é a adição apenas após MutableLiveData<Resource<List<Noticia>?>>() ter uma instância, até para evitarmos Null Pointer Exceptions, ou algo do tipo.
+
+Seguindo, em buscaNaApi será necessário devolver um mediador, pois deixamos de lidar com o antigo Live Data:
+
+buscaNaApi(
+    quandoFalha = { erro ->
+        falhasDaWebApiLiveData.value = Resource(dado = null, erro = erro)
+    })
+return mediadorCOPIAR CÓDIGO
+Vamos testar o aplicativo para verificar se conseguimos carregar a lista, obter um erro quando este ocorre, e assim por diante. A lista será exibida sem nenhum problema, rotacionaremos a tela, e tudo isto é realizado no onCreate() de ListaNoticiasActivity.kt, de que, inclusive, poderemos deletar o seguinte trecho:
+
+override fun onResume() {
+    super.onResume()
+}COPIAR CÓDIGO
+Executaremos a aplicação novamente, desta vez com a certeza de que tudo consta no onCreate(), e não em onResume(). Testaremos a inclusão de uma notícia, que é bem sucedida, e quando forçamos um erro a mensagem de erro é exibida, como esperado, assim como quando rotacionamos a tela depois, o que significa que o último valor é mantido.
+
+Recapitulando os benefícios desta nova abordagem:
+
+atualizações automáticas;
+não precisamos manter o onResume(), pois fazemos uma única chamada;
+temos a capacidade de reunir os dois tipos de retorno com base em nosso mediador.
+Entretanto, deste modo, poderemos lidar com certos valores inesperados, pois retornamos apenas erros da nossa falha na API. De repente criamos uma falha interna em nosso banco de dados, neste caso, um Live Data específico para isto seria interessante. Aqui, consideramos o uso de um único Live Data porque retiramos a responsabilidade da Activity de tomar cuidado com outros Live Data.
+
+Utilizando o mediador, poderemos deixar tudo isso em um único ponto, enviando a lista, quando houver, e o erro da Web API. Porém, na parte do erro interno do banco de dados, não conseguimos fazer muitas notificações, caso este seja um interesse, talvez seja melhor utilizar outro Live Data, ou até mesmo outra estrutura de banco de dados, para armazenar os erros, ou algo neste sentido.
+
+@@07
+Utilizando o mediador de LiveData
+
+Ajuste o código da busca de notícias para que seja possível retornar, tanto a busca interna, como também, a busca externa.
+Utilize o mediador para que seja possível retornar a lista de notícias do banco de dados interno, como também, os possíveis erros da Web API.
+
+Lembre-se de manter o mesmo comportamento de cache para esta solução. Também, migre a chamada de busca para que seja feita no estado de criação da Activity de lista de notícias
+
+Após aplicar o ajuste, teste o App e veja se os comportamentos de busca e possíveis erros funcionam como o esperado, principalmente pelo fato da busca ser feita no estado de criação da Activity.
+
+Com esse ajuste as buscas feitas pelo App são feitas de maneira automática quando ocorrem mudanças diretas no banco de dados, portanto, não há mais a necessidade de editar os LiveDatas.
+Você pode conferir o código da atividade a partir deste commit.
+
+https://github.com/alura-cursos/android-tech-news/commit/ab34a7d8e50cc522a4e46431e2ce98d452605921
+
+@@08
+Refatorando o código
+
+Realizamos a integração do Live Data com o Room, e agora nos atentaremos com um detalhe relacionado ao comportamento de remoção. Quando fizemos o ajuste da busca para que ela seja feita com a integração entre o Live Data e o Room, não testamos exatamente como o procedimento de remoção de uma notícia é feito.
+Ele não está funcionando, pois se acessarmos o VisualizaNoticiaViewModel.kt, que representa o visualizador, teremos que ainda utilizamos o noticiaEncontrada executando o buscaPorId(), e devolvemos a nossa notícia propriamente dita quando fazemos a chamada de função. O problema disso, diante do contexto atual, é que esta chamada só devolverá a notícia em nossa Activity.
+
+Quando fizermos a chamada novamente, isto não acontecerá, pois não fazemos uma execução manual, e sim de forma automática, que funciona somente quando é realizado o Observer, portanto não temos o valor acessível da maneira como conseguíamos anteriormente. Sendo assim, é necessário que a chamada do repositório, repository.buscaPorId(id) a ser persistida em noticiaEncontrada seja feita diretamente.
+
+Então, em vez de termos buscaPorId(), disponibilizaremos a Property, que irá representar a noticiaEncontrada. A linha correspondente ficará simplesmente val noticiaEncontrada = repository.buscaPorId(id). Assim, garantimos que quando a Activity chamar a noticiaEncontrada e fizer uma observação, teremos o valor disponível.
+
+E em VisualizaNoticiaActivity.kt, precisaremos utilizar a referência da nossa Property, que terá o Live Data disponível, integrado ao Room, que fará a atualização assim que a solicitação for feita da primeira vez. As demais atualizações serão feitas quando houver uma atualização no banco de dados.
+
+private fun buscaNoticiaSelecionada() {
+    viewModel.noticiaEncontrada.observe(owner: this, Observer { noticiaEncontrada ->
+        noticiaEncontrada?.let {it: Noticia
+            preencheCampos(it)
+        }
+    })
+}COPIAR CÓDIGO
+Vamos executar a aplicação para confirmar que o funcionamento é bem sucedido, em seguida poderemos partir para a refatoração. noticiaEncontrada está integrado diretamente àquele Live Data que está vinculado em nosso Room, o que antes não era possível por termos que fazê-lo manualmente.
+
+Em VisualizaNoticiaViewModel, não precisamos mais manter o ID como uma Property:
+
+class VisualizaNoticiaViewModel(
+    id: Long,
+    private val repository: NoticiaRepository
+) : ViewModel() {
+// código omitido
+}COPIAR CÓDIGO
+Outra refatoração que podemos fazer é no Resource.kt que possui até mesmo a referência de notícias, que retiraremos para otimização de imports. Também removeremos o seguinte trecho:
+
+fun <T> criaResourceDeFalha(
+    resourceAtual: Resource<T?>?,
+    erro: String?
+): Resource<T?> {
+    if (resourceAtual != null) {
+        return Resource(dado = resourceAtual.dado, erro = erro)
+    }
+    return Resource(dado = null, erro = erro)
+}COPIAR CÓDIGO
+Em NoticiaRepository.kt, fazemos a criação por meio do mediador, e neste caso não faremos tantas extrações, porém fiquem à vontade para criar funções, fazer Early returns, utilizar inspetor de código ou fazer outras refatorações. Concluímos todas as features para que o aplicativo funcione com a nova técnica integrada entre View Model, Live Data e Room.
+
+@@09
+Ajustando ViewModel da Activity de visualização
+
+Ajuste o código para que o comportamento de remoção funcione considerando a atualização automática da busca de notícia por id.
+Aproveite também e refatore o código removendo comentários, extraindo funções ou variáveis.
+
+Fique à vontade em ajustar o código da maneira que preferir durante a refatoração.
+Por fim, teste o App e veja se todos os comportamentos estão funcionando como o esperado.
+
+Todas as funcionalidades do App devem funcionar sem nenhum problema.
+Você pode conferir o código da atividade a partir deste commit.
+
+https://github.com/alura-cursos/android-tech-news/commit/73d9cd3e3acba69b458f2cf18fccf34e740329e5
+
+@@10
+Para saber mais - Injeção de dependência
+
+Durante a migração das Activities criamos um factory para ViewModel que precisava de um repositório. Além de criar um código repetitivo, tende a ser uma rotina trabalhosa.
+Para evitar esse tipo de abordagem, podemos considerar técnicas de injeção de dependência para flexibilizar esse tipo de solução.
+
+Dentre as possibilidade existentes, podemos considerar o Koin como uma alternativa de fácil implementação.
+
+Caso tenha interesse em experimentá-lo, confira os vídeos da Alura+ que mostra como é possível adaptar esse mesmo projeto com essa técnica:
+
+Parte 1;
+Parte 2
+
+https://insert-koin.io/
+
+https://cursos.alura.com.br/injecao-de-dependencia-em-projetos-android-com-koin-parte-1-c48
+
+https://cursos.alura.com.br/injecao-de-dependencia-em-projetos-android-com-koin-parte-2-c49
+
+@@11
+O que aprendemos?
+
+Nesta aula, aprendemos:
+Integrar o Room com o LiveData para atualização automática;
+Utilizar o Mediador de LiveData;
+Manter o dado do LiveData automático dentro do ViewModel.
+
+@@12
+Conclusão
+
+Chegamos ao fim do curso de arquitetura de apps Android com View Model, Live Data e Room, durante o qual aprendemos um conteúdo bem mais avançado no desenvolvimento de aplicativos. Aproveitando este momento de conclusão, revisaremos tudo o que foi visto.
+No começo do curso conhecemos o aplicativo que realiza um CRUD de notícias, o Tech News, com uma listagem possibilitando inserção, edição e remoção de notícias. Percebemos que suas implementações são realizadas como aprendemos em outros cursos, com as Activities, que se comunicam diretamente com o repositório, que por sua vez se comunica com o banco de dados interno, ou com a Web API.
+
+A princípio, tudo funcioava sem nenhum problema, porém, durante o curso analisamos que existem situações que demandam certa preocupação e envolvem a forma como o sistema operacional (Android) funciona, e lida com o ciclo de vida. Da maneira como estava, não tínhamos tantos cuidados, e focamos em detalhes levando em consideração as orientações da equipe de desenvolvedores do Android.
+
+Em específico, nossa preocupação era a maneira como atualizávamos o conteúdo das nossas telas. Se fizéssemos uma busca em nossa Web API, ou no banco de dados, independentemente da demora ou disponibilidade da tela, não fazíamos este tipo de gerenciamento. Simplesmente devolvíamos a requisição — interna ou externa — após sua finalização.
+
+No entanto, isto implicava em chances de vazamento de memória, por "prendermos" uma referência que pode ser que não exista mais. Usuários de Android acabam interagindo bastante com o sistema operacional, em diversos contextos, navegando entre programas diferentes. Tudo isso vai fazendo com que nosso aplicativo entre em estados diferentes, então, "prender" uma Activity não faz sentido, dado que ela pode ser destruída a qualquer momento.
+
+Para resolvermos tudo isso, utilizamos o guia para nos orientar, algo bastante recomendado por questões de experiência do usuário, e aprendemos um modelo de arquitetura sugerida pela equipe de desenvolvedores do Android, bastante similar ao que fazíamos anteriormente em nossos aplicativos, isto é, utilizar Activities, ou Fragment, envolvendo uma comunicação direta com o repositório, que por sua vez se comunica com o banco de dados interno e a Web API.
+
+A partir disso, passamos a entender as situações com as quais precisamos nos preocupar, e como resolvê-las. Uma das soluções é acrescentar um intermediário como o View Model e o Live Data. Vimos um pouco mais sobre tais componentes e sobre como eles funcionam, e vimos que eles fazem parte do Jetpack do Android, conjunto de bibliotecas disponibilizadas pela equipe do Android e que faz parte da questão de arquitetura e da organização dos nossos aplicativos.
+
+Seguindo uma estrutura muito bem definida, pudemos compreender e utilizar o Live Data e o View Model, de acordo com as suas regras de implementação. Vimos que o View Model é uma classe que mantém os dados da nossa tela, portanto não manteremos estados ou dados da Activity dentro dela, uma vez que isto pode ser perigoso, pois se fizermos uma mudança de configuração, como a rotação da tela, os dados são perdidos.
+
+O View Model, por ser uma instância que opera em paralelo com o ciclo de vida da Activity e ficar vinculado quando o provedor o cria, consegue identificar a mudança de configuração da Activity e manter os últimos dados armazenados. Da mesma forma, o Live Data é uma classe com responsabilidade de prover os dados em nosso View Model, que podem vir do repositório, ou de qualquer fonte de dados para nossa Activity no momento oportuno, isto é, quando o ciclo de vida estiver disponível.
+
+Como citado anteriormente, percebemos que isto é muito importante para evitar o leak de memória, fixando uma instância inutilizada no momento. Com estes dois componentes, conseguimos atender muito bem este tipo de necessidade. Esta abordagem que respeita o ciclo de vida e que, quando ativa, faz as atualizações necessárias, e quando destruída remove todos os vínculos entre os componentes, é conhecida como Lifecycle aware, um ciclo de vida consciente.
+
+Vimos tanto a parte teórica quanto de implementação, e alguns desafios existentes, já que em vez de trabalharmos com Callbacks ou Listeners, passamos a lidar diretamente com Live Data em qualquer tipo de atualização para evitar a fixação de referência. Durante as implementações vimos diversas peculiaridades, pois havia a necessidade de situações em que devolvíamos outras informações, como uma lista de notícias e, paralelamente, um possível erro em uma busca.
+
+Para isto, utilizamos o Resource, classe que mantém o dado que queremos disponibilizar e o erro que pode acontecer. Deste modo, temos várias estratégias importantes, como o cache do dado, a manutenção do cache e do erro, a manutenção do cache enquanto se faz uma busca, e assim por diante. Conseguimos maior flexibilidade em situações muito comuns em aplicativos que consideram este mesmo tipo de padrão.
+
+É importante ressaltar que tudo que vimos em aulas são uma regra a ser seguida no desenvolvimento de todos os aplicativos. O intuito do curso é mostrar uma técnica sugerida pela equipe de desenvolvimento do Android, sem obrigatoriedade de migração. Outro detalhe é que a parte mais importante do curso talvez seja entender a teoria, a partir do qual conseguimos pensar no aplicativo que temos atualmente, em como podemos adaptá-lo utilizando estes componentes novos, levando em conta seus benefícios.
+
+Como vimos, não implementamos novas features, nem focamos tanto no projeto em si, e sim em como estruturar o código para uma melhor adaptação e qualidade, tanto para quem desenvolve quanto para o usuário final. Caso haja alguma dúvida, fiquem à vontade para entrarem em contato, porque este curso proporciona discussões, e a implementação que vimos aqui não é a única solução universal, tudo é questionável e personalizável.
+
+Conto com o feedback e as opiniões sobre o curso! Até mais!
+
+https://github.com/alura-cursos/android-tech-news/archive/aula-5.zip
+
+https://github.com/alura-cursos/android-tech-news/tree/aula-5
